@@ -81,6 +81,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+sample_data.csv
 
 # Spyder project settings
 .spyderproject
