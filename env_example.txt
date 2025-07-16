@@ -1,0 +1,10 @@
+# .envファイルのサンプル
+# このファイルを .env にリネームして使用してください
+
+# OpenAI API Configuration
+OPENAI_API_KEY=sk-your-openai-api-key-here
+
+# 使用方法：
+# 1. このファイルを .env にリネームしてください
+# 2. OPENAI_API_KEY の値を実際のAPIキーに置き換えてください
+# 3. .envファイルは.gitignoreに追加され、Gitにコミットされません 
