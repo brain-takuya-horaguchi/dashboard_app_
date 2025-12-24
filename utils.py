@@ -664,12 +664,51 @@ def find_column(df: pd.DataFrame, possible_names: List[str]) -> Optional[str]:
     return None
 
 
-def calculate_company_introduction_to_contract_rate(df: pd.DataFrame) -> pd.DataFrame:
+def apply_filters(df: pd.DataFrame, selected_companies=None, selected_months=None) -> pd.DataFrame:
+    """
+    企業と月のフィルターを適用する関数
+    """
+    if df.empty:
+        return df
+    
+    # 日付カラムのパース
+    df = df.copy()
+    df['書類提出日_parsed'] = pd.to_datetime(df['進捗：書類提出日'], errors='coerce')
+    df['面接日_parsed'] = pd.to_datetime(df['進捗：面接日'], errors='coerce')
+    df['内定日_parsed'] = pd.to_datetime(df['進捗：内定日'], errors='coerce')
+    
+    # 企業フィルタリング（「全て」が選択されていない場合のみ）
+    if selected_companies and "全て" not in selected_companies:
+        df = df[df['企業：企業名'].isin(selected_companies)]
+    
+    # 月フィルタリング（「全て」が選択されていない場合のみ）
+    if selected_months and "全て" not in selected_months:
+        mask = pd.Series(False, index=df.index)
+        for month in selected_months:
+            year, month_num = month.split('-')
+            year, month_num = int(year), int(month_num)
+            
+            # 書類提出日、面接日、内定日のいずれかが指定月に含まれる場合
+            for date_col in ['書類提出日_parsed', '面接日_parsed', '内定日_parsed']:
+                mask |= (df[date_col].dt.year == year) & (df[date_col].dt.month == month_num)
+        
+        df = df[mask]
+    
+    return df
+
+
+def calculate_company_introduction_to_contract_rate(df: pd.DataFrame, selected_companies=None, selected_months=None) -> pd.DataFrame:
     """
     企業ごとの紹介～成約率を計算
     成約 = 内定と仮定
     紹介 = 応募OK日がある求職者、または推薦された求職者（応募OK日がない場合は推薦人数）
     """
+    if df.empty:
+        return pd.DataFrame()
+    
+    # フィルターを適用
+    df = apply_filters(df, selected_companies, selected_months)
+    
     if df.empty:
         return pd.DataFrame()
     
@@ -703,11 +742,17 @@ def calculate_company_introduction_to_contract_rate(df: pd.DataFrame) -> pd.Data
     return pd.DataFrame(company_stats)
 
 
-def calculate_job_introduction_to_contract_rate(df: pd.DataFrame) -> pd.DataFrame:
+def calculate_job_introduction_to_contract_rate(df: pd.DataFrame, selected_companies=None, selected_months=None) -> pd.DataFrame:
     """
     求人ごとの紹介～成約率を計算
     求人IDが存在しない場合は、企業名+求職者IDの組み合わせで代替
     """
+    if df.empty:
+        return pd.DataFrame()
+    
+    # フィルターを適用
+    df = apply_filters(df, selected_companies, selected_months)
+    
     if df.empty:
         return pd.DataFrame()
     
@@ -744,13 +789,19 @@ def calculate_job_introduction_to_contract_rate(df: pd.DataFrame) -> pd.DataFram
         return pd.DataFrame(job_stats)
     else:
         # 求人IDが存在しない場合、企業名で代替
-        return calculate_company_introduction_to_contract_rate(df)
+        return calculate_company_introduction_to_contract_rate(df, selected_companies, selected_months)
 
 
-def calculate_avg_recommendations_per_candidate(df: pd.DataFrame) -> Dict:
+def calculate_avg_recommendations_per_candidate(df: pd.DataFrame, selected_companies=None, selected_months=None) -> Dict:
     """
     求職者1人当たりの平均推薦数を計算
     """
+    if df.empty:
+        return {'avg_recommendations': 0, 'total_candidates': 0, 'total_recommendations': 0}
+    
+    # フィルターを適用
+    df = apply_filters(df, selected_companies, selected_months)
+    
     if df.empty:
         return {'avg_recommendations': 0, 'total_candidates': 0, 'total_recommendations': 0}
     
@@ -765,11 +816,17 @@ def calculate_avg_recommendations_per_candidate(df: pd.DataFrame) -> Dict:
     }
 
 
-def calculate_interview_to_recommendation_leadtime(df: pd.DataFrame) -> pd.DataFrame:
+def calculate_interview_to_recommendation_leadtime(df: pd.DataFrame, selected_companies=None, selected_months=None) -> pd.DataFrame:
     """
     面談から推薦までのリードタイムを計算
     面談日と推薦日（書類提出日）の差を計算
     """
+    if df.empty:
+        return pd.DataFrame()
+    
+    # フィルターを適用
+    df = apply_filters(df, selected_companies, selected_months)
+    
     if df.empty:
         return pd.DataFrame()
     
@@ -808,10 +865,16 @@ def calculate_interview_to_recommendation_leadtime(df: pd.DataFrame) -> pd.DataF
     return pd.DataFrame()
 
 
-def calculate_interviews_by_ca(df: pd.DataFrame) -> pd.DataFrame:
+def calculate_interviews_by_ca(df: pd.DataFrame, selected_companies=None, selected_months=None) -> pd.DataFrame:
     """
     CAごとの面談数を計算
     """
+    if df.empty:
+        return pd.DataFrame()
+    
+    # フィルターを適用
+    df = apply_filters(df, selected_companies, selected_months)
+    
     if df.empty:
         return pd.DataFrame()
     
@@ -849,10 +912,16 @@ def calculate_interviews_by_ca(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def calculate_scouter_performance(df: pd.DataFrame) -> pd.DataFrame:
+def calculate_scouter_performance(df: pd.DataFrame, selected_companies=None, selected_months=None) -> pd.DataFrame:
     """
     スカウターのパフォーマンス測定
     """
+    if df.empty:
+        return pd.DataFrame()
+    
+    # フィルターを適用
+    df = apply_filters(df, selected_companies, selected_months)
+    
     if df.empty:
         return pd.DataFrame()
     
@@ -893,19 +962,29 @@ def calculate_scouter_performance(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def create_company_introduction_contract_chart(df: pd.DataFrame) -> go.Figure:
+def create_company_introduction_contract_chart(df: pd.DataFrame, selected_companies=None, selected_months=None, sort_by='紹介数', sort_order='降順', limit=10) -> go.Figure:
     """
     企業ごとの紹介～成約率グラフを作成
+    
+    Parameters:
+    - sort_by: 並び替え基準 ('紹介数', '成約数', '成約率')
+    - sort_order: 並び替え順序 ('昇順', '降順')
+    - limit: 表示件数
     """
-    stats_df = calculate_company_introduction_to_contract_rate(df)
+    stats_df = calculate_company_introduction_to_contract_rate(df, selected_companies, selected_months)
     
     if stats_df.empty:
         fig = go.Figure()
         fig.add_annotation(text="データがありません", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
         return fig
     
-    # 上位10社を表示
-    top_companies = stats_df.nlargest(10, '紹介数')
+    # 並び替え
+    ascending = (sort_order == '昇順')
+    if sort_by in stats_df.columns:
+        stats_df = stats_df.sort_values(sort_by, ascending=ascending)
+    
+    # 指定件数を表示
+    top_companies = stats_df.head(limit)
     
     fig = go.Figure()
     
@@ -952,19 +1031,29 @@ def create_company_introduction_contract_chart(df: pd.DataFrame) -> go.Figure:
     return fig
 
 
-def create_job_introduction_contract_chart(df: pd.DataFrame) -> go.Figure:
+def create_job_introduction_contract_chart(df: pd.DataFrame, selected_companies=None, selected_months=None, sort_by='紹介数', sort_order='降順', limit=15) -> go.Figure:
     """
     求人ごとの紹介～成約率グラフを作成
+    
+    Parameters:
+    - sort_by: 並び替え基準 ('紹介数', '成約数', '成約率')
+    - sort_order: 並び替え順序 ('昇順', '降順')
+    - limit: 表示件数
     """
-    stats_df = calculate_job_introduction_to_contract_rate(df)
+    stats_df = calculate_job_introduction_to_contract_rate(df, selected_companies, selected_months)
     
     if stats_df.empty:
         fig = go.Figure()
         fig.add_annotation(text="データがありません", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
         return fig
     
-    # 上位15求人を表示
-    top_jobs = stats_df.nlargest(15, '紹介数')
+    # 並び替え
+    ascending = (sort_order == '昇順')
+    if sort_by in stats_df.columns:
+        stats_df = stats_df.sort_values(sort_by, ascending=ascending)
+    
+    # 指定件数を表示
+    top_jobs = stats_df.head(limit)
     
     fig = go.Figure()
     
@@ -1011,21 +1100,24 @@ def create_job_introduction_contract_chart(df: pd.DataFrame) -> go.Figure:
     return fig
 
 
-def create_avg_recommendations_chart(df: pd.DataFrame) -> go.Figure:
+def create_avg_recommendations_chart(df: pd.DataFrame, selected_companies=None, selected_months=None) -> go.Figure:
     """
     求職者1人当たりの平均推薦数グラフを作成
     """
-    stats = calculate_avg_recommendations_per_candidate(df)
+    stats = calculate_avg_recommendations_per_candidate(df, selected_companies, selected_months)
     
     if stats['total_candidates'] == 0:
         fig = go.Figure()
         fig.add_annotation(text="データがありません", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
         return fig
     
+    # フィルターを適用（グラフ表示用）
+    filtered_df = apply_filters(df, selected_companies, selected_months)
+    
     # 企業ごとの平均推薦数を計算
     company_stats = []
-    for company in df['企業：企業名'].unique():
-        company_data = df[df['企業：企業名'] == company]
+    for company in filtered_df['企業：企業名'].unique():
+        company_data = filtered_df[filtered_df['企業：企業名'] == company]
         candidates = company_data['求職者：求職者ID'].nunique()
         recommendations = len(company_data)
         avg = recommendations / candidates if candidates > 0 else 0
@@ -1067,11 +1159,11 @@ def create_avg_recommendations_chart(df: pd.DataFrame) -> go.Figure:
     return fig
 
 
-def create_leadtime_chart(df: pd.DataFrame) -> go.Figure:
+def create_leadtime_chart(df: pd.DataFrame, selected_companies=None, selected_months=None) -> go.Figure:
     """
     面談から推薦までのリードタイムグラフを作成
     """
-    stats_df = calculate_interview_to_recommendation_leadtime(df)
+    stats_df = calculate_interview_to_recommendation_leadtime(df, selected_companies, selected_months)
     
     if stats_df.empty:
         fig = go.Figure()
@@ -1111,11 +1203,11 @@ def create_leadtime_chart(df: pd.DataFrame) -> go.Figure:
     return fig
 
 
-def create_ca_interviews_chart(df: pd.DataFrame) -> go.Figure:
+def create_ca_interviews_chart(df: pd.DataFrame, selected_companies=None, selected_months=None) -> go.Figure:
     """
     面談数（CAごと）グラフを作成
     """
-    stats_df = calculate_interviews_by_ca(df)
+    stats_df = calculate_interviews_by_ca(df, selected_companies, selected_months)
     
     if stats_df.empty:
         fig = go.Figure()
@@ -1155,11 +1247,11 @@ def create_ca_interviews_chart(df: pd.DataFrame) -> go.Figure:
     return fig
 
 
-def create_scouter_performance_chart(df: pd.DataFrame) -> go.Figure:
+def create_scouter_performance_chart(df: pd.DataFrame, selected_companies=None, selected_months=None) -> go.Figure:
     """
     スカウターのパフォーマンス測定グラフを作成
     """
-    stats_df = calculate_scouter_performance(df)
+    stats_df = calculate_scouter_performance(df, selected_companies, selected_months)
     
     if stats_df.empty:
         fig = go.Figure()
