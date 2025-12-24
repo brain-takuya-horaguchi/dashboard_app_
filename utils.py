@@ -7,9 +7,69 @@ import openai
 import streamlit as st
 import os
 from dotenv import load_dotenv
+import chardet
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # .envファイルを読み込む
 load_dotenv()
+
+
+def detect_encoding(file_bytes: bytes) -> str:
+    """
+    CSVファイルのエンコーディングを自動検出する関数
+    """
+    # よく使われる日本語エンコーディングのリスト
+    encodings = ['utf-8', 'shift_jis', 'cp932', 'euc-jp', 'iso-2022-jp']
+    
+    # chardetを使用してエンコーディングを検出
+    detected = chardet.detect(file_bytes)
+    if detected and detected['encoding']:
+        # 検出されたエンコーディングを優先的に試す
+        detected_encoding = detected['encoding'].lower()
+        if detected_encoding in encodings:
+            encodings.insert(0, detected_encoding)
+    
+    # 各エンコーディングを試す
+    for encoding in encodings:
+        try:
+            # ファイルの先頭部分をデコードしてテスト
+            file_bytes[:10000].decode(encoding)
+            return encoding
+        except (UnicodeDecodeError, LookupError):
+            continue
+    
+    # デフォルトとしてUTF-8を返す
+    return 'utf-8'
+
+
+def read_csv_with_encoding(uploaded_file) -> pd.DataFrame:
+    """
+    エンコーディングを自動検出してCSVファイルを読み込む関数
+    """
+    # ファイルをバイトとして読み込む
+    file_bytes = uploaded_file.read()
+    uploaded_file.seek(0)  # ファイルポインタをリセット
+    
+    # エンコーディングを検出
+    encoding = detect_encoding(file_bytes)
+    
+    # 検出されたエンコーディングでCSVを読み込む
+    try:
+        df = pd.read_csv(uploaded_file, encoding=encoding)
+        return df
+    except Exception as e:
+        # エンコーディング検出が失敗した場合、よく使われるエンコーディングを順に試す
+        encodings = ['utf-8', 'shift_jis', 'cp932', 'euc-jp', 'latin-1']
+        for enc in encodings:
+            try:
+                uploaded_file.seek(0)
+                df = pd.read_csv(uploaded_file, encoding=enc)
+                return df
+            except:
+                continue
+        # すべて失敗した場合はエラーを再発生
+        raise Exception(f"CSVファイルの読み込みに失敗しました。エンコーディングの検出ができませんでした。エラー: {str(e)}")
 
 def validate_data(df: pd.DataFrame) -> Dict:
     """
@@ -591,4 +651,573 @@ def export_chat_history() -> str:
         return export_text
         
     except Exception as e:
-        return f"# エラー: チャット履歴のエクスポートに失敗しました\n\nエラー詳細: {str(e)}" 
+        return f"# エラー: チャット履歴のエクスポートに失敗しました\n\nエラー詳細: {str(e)}"
+
+
+def find_column(df: pd.DataFrame, possible_names: List[str]) -> Optional[str]:
+    """
+    データフレーム内で可能なカラム名を検索する関数
+    """
+    for name in possible_names:
+        if name in df.columns:
+            return name
+    return None
+
+
+def calculate_company_introduction_to_contract_rate(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    企業ごとの紹介～成約率を計算
+    成約 = 内定と仮定
+    紹介 = 応募OK日がある求職者、または推薦された求職者（応募OK日がない場合は推薦人数）
+    """
+    if df.empty:
+        return pd.DataFrame()
+    
+    # 日付のパース
+    df['内定日_parsed'] = pd.to_datetime(df['進捗：内定日'], errors='coerce')
+    df['応募OK日_parsed'] = pd.to_datetime(df['進捗：応募OK日'], errors='coerce')
+    
+    company_stats = []
+    for company in df['企業：企業名'].unique():
+        company_data = df[df['企業：企業名'] == company]
+        
+        # 紹介数: 応募OK日がある求職者数、なければ推薦人数（ユニークな求職者ID数）
+        if '進捗：応募OK日' in df.columns:
+            紹介数 = company_data[company_data['応募OK日_parsed'].notna()]['求職者：求職者ID'].nunique()
+            if 紹介数 == 0:
+                # 応募OK日がない場合は推薦人数を使用
+                紹介数 = company_data['求職者：求職者ID'].nunique()
+        else:
+            紹介数 = company_data['求職者：求職者ID'].nunique()  # 推薦人数 = 紹介数
+        
+        成約数 = company_data['内定日_parsed'].notna().sum()  # 内定数 = 成約数
+        成約率 = (成約数 / 紹介数 * 100) if 紹介数 > 0 else 0.0
+        
+        company_stats.append({
+            '企業名': company,
+            '紹介数': 紹介数,
+            '成約数': 成約数,
+            '成約率': 成約率
+        })
+    
+    return pd.DataFrame(company_stats)
+
+
+def calculate_job_introduction_to_contract_rate(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    求人ごとの紹介～成約率を計算
+    求人IDが存在しない場合は、企業名+求職者IDの組み合わせで代替
+    """
+    if df.empty:
+        return pd.DataFrame()
+    
+    # 求人IDカラムを探す
+    job_id_col = find_column(df, ['求人：求人ID', '求人ID', '求人：ID', 'job_id', 'JobID'])
+    
+    if job_id_col:
+        # 求人IDが存在する場合
+        df['内定日_parsed'] = pd.to_datetime(df['進捗：内定日'], errors='coerce')
+        df['応募OK日_parsed'] = pd.to_datetime(df['進捗：応募OK日'], errors='coerce')
+        
+        job_stats = []
+        for job_id in df[job_id_col].dropna().unique():
+            job_data = df[df[job_id_col] == job_id]
+            
+            # 紹介数: 応募OK日がある求職者数、なければ推薦人数
+            if '進捗：応募OK日' in df.columns:
+                紹介数 = job_data[job_data['応募OK日_parsed'].notna()]['求職者：求職者ID'].nunique()
+                if 紹介数 == 0:
+                    紹介数 = job_data['求職者：求職者ID'].nunique()
+            else:
+                紹介数 = job_data['求職者：求職者ID'].nunique()
+            
+            成約数 = job_data['内定日_parsed'].notna().sum()
+            成約率 = (成約数 / 紹介数 * 100) if 紹介数 > 0 else 0.0
+            
+            job_stats.append({
+                '求人ID': job_id,
+                '紹介数': 紹介数,
+                '成約数': 成約数,
+                '成約率': 成約率
+            })
+        
+        return pd.DataFrame(job_stats)
+    else:
+        # 求人IDが存在しない場合、企業名で代替
+        return calculate_company_introduction_to_contract_rate(df)
+
+
+def calculate_avg_recommendations_per_candidate(df: pd.DataFrame) -> Dict:
+    """
+    求職者1人当たりの平均推薦数を計算
+    """
+    if df.empty:
+        return {'avg_recommendations': 0, 'total_candidates': 0, 'total_recommendations': 0}
+    
+    total_candidates = df['求職者：求職者ID'].nunique()
+    total_recommendations = len(df)
+    avg_recommendations = total_recommendations / total_candidates if total_candidates > 0 else 0
+    
+    return {
+        'avg_recommendations': avg_recommendations,
+        'total_candidates': total_candidates,
+        'total_recommendations': total_recommendations
+    }
+
+
+def calculate_interview_to_recommendation_leadtime(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    面談から推薦までのリードタイムを計算
+    面談日と推薦日（書類提出日）の差を計算
+    """
+    if df.empty:
+        return pd.DataFrame()
+    
+    # 面談日カラムを探す（実際のカラム名に合わせる）
+    interview_date_col = find_column(df, [
+        '求職者：面談日',  # 実際のカラム名
+        '面談：面談日', '面談日', '面談：日付', 'interview_date', 
+        '面談：実施日', 'CA：面談日', '求職者：電話面談日'
+    ])
+    
+    # 推薦日 = 書類提出日と仮定
+    df['推薦日_parsed'] = pd.to_datetime(df['進捗：書類提出日'], errors='coerce')
+    
+    if interview_date_col:
+        df['面談日_parsed'] = pd.to_datetime(df[interview_date_col], errors='coerce')
+        
+        # 両方の日付が存在する行のみ
+        valid_data = df[(df['面談日_parsed'].notna()) & (df['推薦日_parsed'].notna())].copy()
+        
+        if not valid_data.empty:
+            valid_data['リードタイム'] = (valid_data['推薦日_parsed'] - valid_data['面談日_parsed']).dt.days
+            
+            leadtime_stats = []
+            for company in valid_data['企業：企業名'].unique():
+                company_data = valid_data[valid_data['企業：企業名'] == company]
+                avg_leadtime = company_data['リードタイム'].mean()
+                
+                leadtime_stats.append({
+                    '企業名': company,
+                    '平均リードタイム': avg_leadtime,
+                    '件数': len(company_data)
+                })
+            
+            return pd.DataFrame(leadtime_stats)
+    
+    return pd.DataFrame()
+
+
+def calculate_interviews_by_ca(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    CAごとの面談数を計算
+    """
+    if df.empty:
+        return pd.DataFrame()
+    
+    # CAカラムを探す（実際のカラム名に合わせる）
+    ca_col = find_column(df, [
+        '求職者：担当者',  # 実際のカラム名
+        'CA：CA名', 'CA名', 'CA：名前', 'CA', 'ca_name', 'CA：担当者',
+        'キャリアアドバイザー', 'CA：ID', 'CA_ID', '求職者：担当チーム'
+    ])
+    
+    if ca_col:
+        # 面談日カラムを探す（実際のカラム名に合わせる）
+        interview_date_col = find_column(df, [
+            '求職者：面談日',  # 実際のカラム名
+            '面談：面談日', '面談日', '面談：日付', 'interview_date',
+            '面談：実施日', 'CA：面談日', '求職者：電話面談日'
+        ])
+        
+        if interview_date_col:
+            df['面談日_parsed'] = pd.to_datetime(df[interview_date_col], errors='coerce')
+            valid_data = df[df['面談日_parsed'].notna()]
+        else:
+            # 面談日がなくても、CAごとに集計
+            valid_data = df
+        
+        ca_stats = valid_data.groupby(ca_col).agg({
+            '求職者：求職者ID': 'nunique',
+            '企業：企業名': 'nunique'
+        }).reset_index()
+        
+        ca_stats.columns = ['CA名', '面談数', '担当企業数']
+        
+        return ca_stats
+    else:
+        return pd.DataFrame()
+
+
+def calculate_scouter_performance(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    スカウターのパフォーマンス測定
+    """
+    if df.empty:
+        return pd.DataFrame()
+    
+    # スカウターカラムを探す（実際のカラム名に合わせる）
+    scouter_col = find_column(df, [
+        'スカウト担当者',  # 実際のカラム名
+        'スカウター：スカウター名', 'スカウター名', 'スカウター：名前', 
+        'スカウター', 'scouter_name', 'スカウター：担当者',
+        'スカウター：ID', 'スカウター_ID'
+    ])
+    
+    if scouter_col:
+        df['内定日_parsed'] = pd.to_datetime(df['進捗：内定日'], errors='coerce')
+        
+        scouter_stats = []
+        for scouter in df[scouter_col].dropna().unique():
+            scouter_data = df[df[scouter_col] == scouter]
+            
+            紹介数 = scouter_data['求職者：求職者ID'].nunique()
+            成約数 = scouter_data['内定日_parsed'].notna().sum()
+            成約率 = (成約数 / 紹介数 * 100) if 紹介数 > 0 else 0.0
+            
+            # 書類提出数
+            書類提出数 = scouter_data['進捗：書類提出日'].notna().sum()
+            書類提出率 = (書類提出数 / 紹介数 * 100) if 紹介数 > 0 else 0.0
+            
+            scouter_stats.append({
+                'スカウター名': scouter,
+                '紹介数': 紹介数,
+                '書類提出数': 書類提出数,
+                '書類提出率': 書類提出率,
+                '成約数': 成約数,
+                '成約率': 成約率
+            })
+        
+        return pd.DataFrame(scouter_stats)
+    else:
+        return pd.DataFrame()
+
+
+def create_company_introduction_contract_chart(df: pd.DataFrame) -> go.Figure:
+    """
+    企業ごとの紹介～成約率グラフを作成
+    """
+    stats_df = calculate_company_introduction_to_contract_rate(df)
+    
+    if stats_df.empty:
+        fig = go.Figure()
+        fig.add_annotation(text="データがありません", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
+        return fig
+    
+    # 上位10社を表示
+    top_companies = stats_df.nlargest(10, '紹介数')
+    
+    fig = go.Figure()
+    
+    fig.add_trace(go.Bar(
+        name='紹介数',
+        x=top_companies['企業名'],
+        y=top_companies['紹介数'],
+        marker_color='rgba(102, 126, 234, 0.7)',
+        text=top_companies['紹介数'],
+        textposition='outside'
+    ))
+    
+    fig.add_trace(go.Bar(
+        name='成約数',
+        x=top_companies['企業名'],
+        y=top_companies['成約数'],
+        marker_color='rgba(76, 175, 80, 0.7)',
+        text=top_companies['成約数'],
+        textposition='outside'
+    ))
+    
+    # 成約率を折れ線グラフで追加
+    fig.add_trace(go.Scatter(
+        name='成約率',
+        x=top_companies['企業名'],
+        y=top_companies['成約率'],
+        mode='lines+markers',
+        yaxis='y2',
+        line=dict(color='#ff6b6b', width=3),
+        marker=dict(size=10)
+    ))
+    
+    fig.update_layout(
+        title='📊 企業ごとの紹介～成約率',
+        xaxis_title='企業名',
+        yaxis_title='人数',
+        yaxis2=dict(title='成約率 (%)', overlaying='y', side='right'),
+        barmode='group',
+        height=500,
+        template='plotly_white',
+        xaxis=dict(tickangle=45)
+    )
+    
+    return fig
+
+
+def create_job_introduction_contract_chart(df: pd.DataFrame) -> go.Figure:
+    """
+    求人ごとの紹介～成約率グラフを作成
+    """
+    stats_df = calculate_job_introduction_to_contract_rate(df)
+    
+    if stats_df.empty:
+        fig = go.Figure()
+        fig.add_annotation(text="データがありません", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
+        return fig
+    
+    # 上位15求人を表示
+    top_jobs = stats_df.nlargest(15, '紹介数')
+    
+    fig = go.Figure()
+    
+    fig.add_trace(go.Bar(
+        name='紹介数',
+        x=top_jobs['求人ID'].astype(str),
+        y=top_jobs['紹介数'],
+        marker_color='rgba(102, 126, 234, 0.7)',
+        text=top_jobs['紹介数'],
+        textposition='outside'
+    ))
+    
+    fig.add_trace(go.Bar(
+        name='成約数',
+        x=top_jobs['求人ID'].astype(str),
+        y=top_jobs['成約数'],
+        marker_color='rgba(76, 175, 80, 0.7)',
+        text=top_jobs['成約数'],
+        textposition='outside'
+    ))
+    
+    # 成約率を折れ線グラフで追加
+    fig.add_trace(go.Scatter(
+        name='成約率',
+        x=top_jobs['求人ID'].astype(str),
+        y=top_jobs['成約率'],
+        mode='lines+markers',
+        yaxis='y2',
+        line=dict(color='#ff6b6b', width=3),
+        marker=dict(size=10)
+    ))
+    
+    fig.update_layout(
+        title='📊 求人ごとの紹介～成約率',
+        xaxis_title='求人ID',
+        yaxis_title='人数',
+        yaxis2=dict(title='成約率 (%)', overlaying='y', side='right'),
+        barmode='group',
+        height=500,
+        template='plotly_white',
+        xaxis=dict(tickangle=45)
+    )
+    
+    return fig
+
+
+def create_avg_recommendations_chart(df: pd.DataFrame) -> go.Figure:
+    """
+    求職者1人当たりの平均推薦数グラフを作成
+    """
+    stats = calculate_avg_recommendations_per_candidate(df)
+    
+    if stats['total_candidates'] == 0:
+        fig = go.Figure()
+        fig.add_annotation(text="データがありません", xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
+        return fig
+    
+    # 企業ごとの平均推薦数を計算
+    company_stats = []
+    for company in df['企業：企業名'].unique():
+        company_data = df[df['企業：企業名'] == company]
+        candidates = company_data['求職者：求職者ID'].nunique()
+        recommendations = len(company_data)
+        avg = recommendations / candidates if candidates > 0 else 0
+        
+        company_stats.append({
+            '企業名': company,
+            '平均推薦数': avg,
+            '求職者数': candidates,
+            '推薦数': recommendations
+        })
+    
+    company_df = pd.DataFrame(company_stats)
+    top_companies = company_df.nlargest(10, '平均推薦数')
+    
+    fig = go.Figure()
+    
+    fig.add_trace(go.Bar(
+        x=top_companies['企業名'],
+        y=top_companies['平均推薦数'],
+        marker=dict(
+            color=top_companies['平均推薦数'],
+            colorscale='Viridis',
+            showscale=True,
+            colorbar=dict(title="平均推薦数")
+        ),
+        text=[f"{val:.2f}" for val in top_companies['平均推薦数']],
+        textposition='outside'
+    ))
+    
+    fig.update_layout(
+        title=f'📊 求職者1人当たりの平均推薦数（全体平均: {stats["avg_recommendations"]:.2f}）',
+        xaxis_title='企業名',
+        yaxis_title='平均推薦数',
+        height=500,
+        template='plotly_white',
+        xaxis=dict(tickangle=45)
+    )
+    
+    return fig
+
+
+def create_leadtime_chart(df: pd.DataFrame) -> go.Figure:
+    """
+    面談から推薦までのリードタイムグラフを作成
+    """
+    stats_df = calculate_interview_to_recommendation_leadtime(df)
+    
+    if stats_df.empty:
+        fig = go.Figure()
+        fig.add_annotation(
+            text="面談日データが見つかりません。「求職者：面談日」カラムが存在するか確認してください。",
+            xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False
+        )
+        return fig
+    
+    # 上位10社を表示
+    top_companies = stats_df.nlargest(10, '件数')
+    
+    fig = go.Figure()
+    
+    fig.add_trace(go.Bar(
+        x=top_companies['企業名'],
+        y=top_companies['平均リードタイム'],
+        marker=dict(
+            color=top_companies['平均リードタイム'],
+            colorscale='Reds',
+            showscale=True,
+            colorbar=dict(title="平均リードタイム (日)")
+        ),
+        text=[f"{val:.1f}日" for val in top_companies['平均リードタイム']],
+        textposition='outside'
+    ))
+    
+    fig.update_layout(
+        title='⏱️ 面談から推薦までのリードタイム（企業別）',
+        xaxis_title='企業名',
+        yaxis_title='平均リードタイム (日)',
+        height=500,
+        template='plotly_white',
+        xaxis=dict(tickangle=45)
+    )
+    
+    return fig
+
+
+def create_ca_interviews_chart(df: pd.DataFrame) -> go.Figure:
+    """
+    面談数（CAごと）グラフを作成
+    """
+    stats_df = calculate_interviews_by_ca(df)
+    
+    if stats_df.empty:
+        fig = go.Figure()
+        fig.add_annotation(
+            text="CAデータが見つかりません。「求職者：担当者」カラムが存在するか確認してください。",
+            xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False
+        )
+        return fig
+    
+    # 面談数でソート
+    stats_df = stats_df.sort_values('面談数', ascending=False)
+    
+    fig = go.Figure()
+    
+    fig.add_trace(go.Bar(
+        x=stats_df['CA名'],
+        y=stats_df['面談数'],
+        marker=dict(
+            color=stats_df['面談数'],
+            colorscale='Blues',
+            showscale=True,
+            colorbar=dict(title="面談数")
+        ),
+        text=stats_df['面談数'],
+        textposition='outside'
+    ))
+    
+    fig.update_layout(
+        title='👥 面談数（CAごと）',
+        xaxis_title='CA名',
+        yaxis_title='面談数',
+        height=500,
+        template='plotly_white',
+        xaxis=dict(tickangle=45)
+    )
+    
+    return fig
+
+
+def create_scouter_performance_chart(df: pd.DataFrame) -> go.Figure:
+    """
+    スカウターのパフォーマンス測定グラフを作成
+    """
+    stats_df = calculate_scouter_performance(df)
+    
+    if stats_df.empty:
+        fig = go.Figure()
+        fig.add_annotation(
+            text="スカウターデータが見つかりません。「スカウト担当者」カラムが存在するか確認してください。",
+            xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False
+        )
+        return fig
+    
+    # 紹介数でソート
+    stats_df = stats_df.sort_values('紹介数', ascending=False)
+    
+    fig = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=('紹介数', '成約率', '書類提出率', '成約数'),
+        specs=[[{"type": "bar"}, {"type": "bar"}],
+               [{"type": "bar"}, {"type": "bar"}]]
+    )
+    
+    # 紹介数
+    fig.add_trace(
+        go.Bar(x=stats_df['スカウター名'], y=stats_df['紹介数'], marker_color='rgba(102, 126, 234, 0.7)'),
+        row=1, col=1
+    )
+    
+    # 成約率
+    fig.add_trace(
+        go.Bar(x=stats_df['スカウター名'], y=stats_df['成約率'], marker_color='rgba(76, 175, 80, 0.7)'),
+        row=1, col=2
+    )
+    
+    # 書類提出率
+    fig.add_trace(
+        go.Bar(x=stats_df['スカウター名'], y=stats_df['書類提出率'], marker_color='rgba(255, 152, 0, 0.7)'),
+        row=2, col=1
+    )
+    
+    # 成約数
+    fig.add_trace(
+        go.Bar(x=stats_df['スカウター名'], y=stats_df['成約数'], marker_color='rgba(156, 39, 176, 0.7)'),
+        row=2, col=2
+    )
+    
+    fig.update_layout(
+        title='🎯 スカウターのパフォーマンス測定',
+        height=700,
+        template='plotly_white',
+        showlegend=False
+    )
+    
+    fig.update_xaxes(tickangle=45, row=1, col=1)
+    fig.update_xaxes(tickangle=45, row=1, col=2)
+    fig.update_xaxes(tickangle=45, row=2, col=1)
+    fig.update_xaxes(tickangle=45, row=2, col=2)
+    
+    fig.update_yaxes(title_text="人数", row=1, col=1)
+    fig.update_yaxes(title_text="率 (%)", row=1, col=2)
+    fig.update_yaxes(title_text="率 (%)", row=2, col=1)
+    fig.update_yaxes(title_text="人数", row=2, col=2)
+    
+    return fig 

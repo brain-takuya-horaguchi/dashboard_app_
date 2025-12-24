@@ -3,6 +3,7 @@
 .env.local
 .env.*.local
 
+
 # Python関連
 __pycache__/
 *.py[cod]
@@ -119,3 +120,7 @@ Thumbs.db
 
 # Streamlit
 .streamlit/ 
+
+db_202511.csv
+
+env_example.txt

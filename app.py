@@ -14,7 +14,13 @@ from utils import (
     validate_data, generate_alerts, generate_recommendations, 
     calculate_conversion_funnel,
     setup_openai_client, query_data_with_ai, get_suggested_questions,
-    save_chat_history, export_chat_history
+    save_chat_history, export_chat_history, read_csv_with_encoding,
+    create_company_introduction_contract_chart,
+    create_job_introduction_contract_chart,
+    create_avg_recommendations_chart,
+    create_leadtime_chart,
+    create_ca_interviews_chart,
+    create_scouter_performance_chart
 )
 
 # .envファイルを読み込む
@@ -645,7 +651,7 @@ def main():
             
             # データの読み込み
             try:
-                df = pd.read_csv(uploaded_file)
+                df = read_csv_with_encoding(uploaded_file)
                 
                 # データ検証
                 st.header("🔍 データ検証")
@@ -986,6 +992,96 @@ def main():
                     st.header("📈 トレンド分析")
                     trend_fig = create_trend_analysis(df, selected_companies)
                     st.plotly_chart(trend_fig, use_container_width=True)
+                
+                # 新しい分析グラフ
+                st.header("📊 追加分析グラフ")
+                
+                # タブでグラフを整理
+                graph_tab1, graph_tab2, graph_tab3, graph_tab4, graph_tab5, graph_tab6 = st.tabs([
+                    "企業ごとの紹介～成約率",
+                    "求人ごとの紹介～成約率",
+                    "求職者1人当たりの平均推薦数",
+                    "面談から推薦までのリードタイム",
+                    "面談数（CAごと）",
+                    "スカウターのパフォーマンス"
+                ])
+                
+                with graph_tab1:
+                    st.subheader("📊 企業ごとの紹介～成約率")
+                    company_intro_fig = create_company_introduction_contract_chart(df)
+                    st.plotly_chart(company_intro_fig, use_container_width=True)
+                    
+                    # データテーブル
+                    from utils import calculate_company_introduction_to_contract_rate
+                    company_intro_df = calculate_company_introduction_to_contract_rate(df)
+                    if not company_intro_df.empty:
+                        st.dataframe(company_intro_df.sort_values('成約率', ascending=False), use_container_width=True)
+                
+                with graph_tab2:
+                    st.subheader("📊 求人ごとの紹介～成約率")
+                    job_intro_fig = create_job_introduction_contract_chart(df)
+                    st.plotly_chart(job_intro_fig, use_container_width=True)
+                    
+                    # データテーブル
+                    from utils import calculate_job_introduction_to_contract_rate
+                    job_intro_df = calculate_job_introduction_to_contract_rate(df)
+                    if not job_intro_df.empty:
+                        st.dataframe(job_intro_df.sort_values('成約率', ascending=False), use_container_width=True)
+                
+                with graph_tab3:
+                    st.subheader("📊 求職者1人当たりの平均推薦数")
+                    avg_rec_fig = create_avg_recommendations_chart(df)
+                    st.plotly_chart(avg_rec_fig, use_container_width=True)
+                    
+                    # 統計情報
+                    from utils import calculate_avg_recommendations_per_candidate
+                    avg_stats = calculate_avg_recommendations_per_candidate(df)
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("全体平均推薦数", f"{avg_stats['avg_recommendations']:.2f}")
+                    with col2:
+                        st.metric("総求職者数", f"{avg_stats['total_candidates']:,}")
+                    with col3:
+                        st.metric("総推薦数", f"{avg_stats['total_recommendations']:,}")
+                
+                with graph_tab4:
+                    st.subheader("⏱️ 面談から推薦までのリードタイム")
+                    leadtime_fig = create_leadtime_chart(df)
+                    st.plotly_chart(leadtime_fig, use_container_width=True)
+                    
+                    # データテーブル
+                    from utils import calculate_interview_to_recommendation_leadtime
+                    leadtime_df = calculate_interview_to_recommendation_leadtime(df)
+                    if not leadtime_df.empty:
+                        st.dataframe(leadtime_df.sort_values('平均リードタイム', ascending=True), use_container_width=True)
+                    else:
+                        st.info("💡 面談日データが必要です。CSVファイルに「求職者：面談日」カラムが含まれているか確認してください。")
+                
+                with graph_tab5:
+                    st.subheader("👥 面談数（CAごと）")
+                    ca_fig = create_ca_interviews_chart(df)
+                    st.plotly_chart(ca_fig, use_container_width=True)
+                    
+                    # データテーブル
+                    from utils import calculate_interviews_by_ca
+                    ca_df = calculate_interviews_by_ca(df)
+                    if not ca_df.empty:
+                        st.dataframe(ca_df.sort_values('面談数', ascending=False), use_container_width=True)
+                    else:
+                        st.info("💡 CAデータが必要です。CSVファイルに「求職者：担当者」カラムが含まれているか確認してください。")
+                
+                with graph_tab6:
+                    st.subheader("🎯 スカウターのパフォーマンス測定")
+                    scouter_fig = create_scouter_performance_chart(df)
+                    st.plotly_chart(scouter_fig, use_container_width=True)
+                    
+                    # データテーブル
+                    from utils import calculate_scouter_performance
+                    scouter_df = calculate_scouter_performance(df)
+                    if not scouter_df.empty:
+                        st.dataframe(scouter_df.sort_values('成約率', ascending=False), use_container_width=True)
+                    else:
+                        st.info("💡 スカウターデータが必要です。CSVファイルに「スカウト担当者」カラムが含まれているか確認してください。")
                 
                 # 詳細データテーブル
                 st.header("📋 詳細データ")
